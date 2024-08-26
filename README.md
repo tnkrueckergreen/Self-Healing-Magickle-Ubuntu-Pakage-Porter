@@ -29,7 +29,7 @@ With this script, you can:
 You wanna use this magic? Download the script or clone the repo. (Don't forget to make it executable or it ain't doin' nothin'.)
 
 ```bash
-git klone https://github.com/your-repo/self-healing-package-porter.git
+git clone https://github.com/tnkrueckergreen/Self-Healing-Magickle-Ubuntu-Pakage-Porter.git
 cd self-healing-package-porter
 chmod +x pakage_porter.sh
 ```

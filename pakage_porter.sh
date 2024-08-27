@@ -222,7 +222,7 @@ resolve_package_conflicts() {
     if [[ -n "$installed_version" ]]; then
         if dpkg --compare-versions "$installed_version" gt "$version"; then
             show_warning "Conflict detected: Installed version of $package ($installed_version) is newer than the version to be installed ($version)."
-            show_info "Prioritizing the older installed version to maintain compatibility."
+            show_info "Prioritizing the newer installed version to maintain compatibility with the current system."
             echo "Kept: $package $installed_version (installed) over $version" >> "$CONFLICT_RESOLUTION_LOG"
             return 1
         else

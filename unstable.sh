@@ -138,7 +138,10 @@ copy_and_resolve_dependencies() {
     show_message "🔮 Analyzing package and resolving dependencies..."
     cp "$deb_file" "$PACKAGE_DIR" 2>> "$LOG_FILE"
 
+    # Store the main package name
     local package_name=$(dpkg-deb -f "$deb_file" Package)
+    echo "$package_name" > "$PACKAGE_DIR/main_package.txt"
+    
     install_apt_rdepends
 
     local processed_deps="$PACKAGE_DIR/processed_dependencies.txt"

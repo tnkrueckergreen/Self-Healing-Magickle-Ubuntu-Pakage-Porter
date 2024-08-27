@@ -1,6 +1,6 @@
 # 🧙‍♂️ Self-Healing Magickle Ubuntu Pakage Porter
 
-**Version**: `2.4`
+**Version**: `1.0`
 
 ## OvErview
 

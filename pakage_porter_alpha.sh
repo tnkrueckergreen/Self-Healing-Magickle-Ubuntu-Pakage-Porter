@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 PACKAGE_DIR="/tmp/ubuntu_package_porter"
 LOG_FILE="$PACKAGE_DIR/package_porter.log"
 DEBUG_MODE=false
-VERSION="2.0 (beta)"
+VERSION="3.0"
 MAX_RETRIES=5
 RETRY_DELAY=5
 UNFETCHABLE_DEPS=()
@@ -67,9 +67,13 @@ show_info() { cecho "$BLUE" "ℹ️ $1"; log "INFO: $1"; }
 # Function to ensure running with sudo
 ensure_sudo() {
     if [[ $EUID -ne 0 ]]; then
-        show_error "This tool needs administrator privileges."
-        show_message "Please run this script with sudo: sudo $0"
-        exit 1
+        show_message "🔐 This tool needs administrator privileges. Please enter your password if prompted."
+        if sudo -v &>/dev/null; then
+            exec sudo "$0" "$@"
+        else
+            show_error "Failed to obtain sudo privileges. Please run this script with sudo."
+            exit 1
+        fi
     fi
 }
 
@@ -114,22 +118,12 @@ check_and_fix_package_manager() {
     fi
 }
 
-# Ubuntu specific installation wrapper
-ubuntu_install() {
-    retry_command apt-get install -y "$@"
-}
-
-# Ubuntu specific download wrapper
-ubuntu_download() {
-    retry_command apt-get download "$@"
-}
-
 # Function to install apt-rdepends if not installed
 install_apt_rdepends() {
     if ! command -v apt-rdepends &> /dev/null; then
         show_message "📦 Installing apt-rdepends to resolve dependencies..."
         retry_command apt-get update
-        ubuntu_install apt-rdepends
+        retry_command apt-get install -y apt-rdepends
     fi
 }
 
@@ -142,10 +136,7 @@ copy_and_resolve_dependencies() {
     fi
 
     show_message "🔮 Analyzing package and resolving dependencies..."
-    if ! cp "$deb_file" "$PACKAGE_DIR" 2>> "$LOG_FILE"; then
-        show_error "Failed to copy $deb_file to $PACKAGE_DIR. Check your permissions."
-        exit 1
-    fi
+    cp "$deb_file" "$PACKAGE_DIR" 2>> "$LOG_FILE"
 
     local package_name=$(dpkg-deb -f "$deb_file" Package)
     install_apt_rdepends
@@ -171,19 +162,16 @@ copy_and_resolve_dependencies() {
         for dep in $deps; do
             if [[ "$dep" != "$package_name" ]] && ! grep -q "^$dep$" "$processed_deps"; then
                 show_info "${indent}  ⬇️ Downloading: $dep"
-                if ! ubuntu_download "$dep"; then
+                if ! retry_command apt-get download "$dep"; then
                     show_warning "Failed to download: $dep. Trying alternative sources..."
-                    if ! ubuntu_download -t $(lsb_release -cs)-backports "$dep"; then
-                        if ! ubuntu_download -t $(lsb_release -cs)-updates "$dep"; then
+                    if ! retry_command apt-get -t $(lsb_release -cs)-backports download "$dep"; then
+                        if ! retry_command apt-get -t $(lsb_release -cs)-updates download "$dep"; then
                             show_warning "Failed to download $dep from all sources. Adding to unfetchable list."
-                            handle_unfetchable_dep "$dep"
+                            UNFETCHABLE_DEPS+=("$dep")
                         fi
                     fi
                 fi
-                if ! mv *.deb "$PACKAGE_DIR" 2>> "$LOG_FILE"; then
-                    show_error "Failed to move .deb files to $PACKAGE_DIR. Check your permissions."
-                    exit 1
-                fi
+                mv *.deb "$PACKAGE_DIR" 2>> "$LOG_FILE" || true
                 resolve_dependencies "$dep" $((depth + 1))
             fi
         done
@@ -211,12 +199,12 @@ check_package_integrity() {
             show_warning "Corrupted package detected: $deb. Removing and retrying..."
             rm "$deb"
             local package_name=$(basename "$deb" .deb | cut -d '_' -f 1)
-            if ! ubuntu_download "$package_name"; then
+            if ! retry_command apt-get download "$package_name"; then
                 show_warning "Failed to re-download $package_name. Attempting to find an alternative..."
-                if ! ubuntu_download -t $(lsb_release -cs)-backports "$package_name"; then
-                    if ! ubuntu_download -t $(lsb_release -cs)-updates "$package_name"; then
+                if ! retry_command apt-get -t $(lsb_release -cs)-backports download "$package_name"; then
+                    if ! retry_command apt-get -t $(lsb_release -cs)-updates download "$package_name"; then
                         show_error "Failed to find an alternative for $package_name. Adding to unfetchable list."
-                        handle_unfetchable_dep "$package_name"
+                        UNFETCHABLE_DEPS+=("$package_name")
                     fi
                 fi
             fi
@@ -246,28 +234,7 @@ resolve_package_conflicts() {
     return 0
 }
 
-# Function to handle unfetchable dependencies
-handle_unfetchable_dep() {
-    local dep=$1
-    read -p "$(cecho "$YELLOW" "⚠️ Failed to fetch $dep. Continue anyway? [y/N]: ")" choice
-    if [[ "$choice" =~ ^[Nn]$ ]]; then
-        show_error "Aborting due to unfetchable dependency: $dep"
-        exit 1
-    fi
-    UNFETCHABLE_DEPS+=("$dep")
-}
-
-# Cleanup function in case of failure
-cleanup_on_failure() {
-    show_warning "🧹 Cleaning up after failure..."
-    retry_command apt-get install -f -y
-    dpkg --configure -a
-    retry_command apt-get autoremove -y
-    retry_command apt-get clean
-    show_message "System cleaned successfully. You can retry the operation."
-}
-
-# Enhanced install_packages function
+# Function to install all packages
 install_packages() {
     show_message "🚀 Commencing intelligent package installation..."
     local total=$(ls "$PACKAGE_DIR"/*.deb | wc -l)
@@ -275,6 +242,10 @@ install_packages() {
     local installation_order=()
     local failed_packages=()
     local retry_queue=()
+    local main_package=""
+
+    # Identify the main package (the one originally copied, not a dependency)
+    main_package=$(basename "$(ls "$PACKAGE_DIR"/*.deb | grep -v "$(cat "$PACKAGE_DIR/processed_dependencies.txt")")")
 
     # First pass: Gather dependency information and create installation order
     for deb in "$PACKAGE_DIR"/*.deb; do
@@ -286,6 +257,9 @@ install_packages() {
     # Topological sort to determine installation order
     tsort "$TEMP_DIR/dep_info.txt" 2>/dev/null > "$TEMP_DIR/install_order.txt" || true
     mapfile -t installation_order < <(tac "$TEMP_DIR/install_order.txt")
+
+    # Remove main package from installation order (to be installed last)
+    installation_order=(${installation_order[@]/$main_package})
 
     # Function to install a single package
     install_single_package() {
@@ -305,12 +279,12 @@ install_packages() {
         return 0
     }
 
-    # Main installation loop
+    # Install dependencies
     for package in "${installation_order[@]}"; do
         local deb=$(find "$PACKAGE_DIR" -name "${package}_*.deb" -print -quit)
         if [[ -n "$deb" ]]; then
             current=$((current + 1))
-            echo -ne "\r${BLUE}Installing package [$current/$total] ${package} ${NC}"
+            echo -ne "\r${BLUE}Installing dependency [$current/$total] ${package} ${NC}"
             install_single_package "$deb" || true
         fi
     done
@@ -327,7 +301,7 @@ install_packages() {
         done
     fi
 
-    # Final dependency resolution
+    # Resolve any remaining dependencies
     show_info "🧩 Resolving any remaining dependencies..."
     retry_command apt-get install -f -y
 
@@ -356,6 +330,20 @@ install_packages() {
         done
     fi
 
+    # Install the main package
+    show_message "📦 Installing the main package: $main_package"
+    local main_deb=$(find "$PACKAGE_DIR" -name "${main_package}" -print -quit)
+    if [[ -n "$main_deb" ]]; then
+        if ! install_single_package "$main_deb"; then
+            show_error "Failed to install the main package. Manual intervention may be required."
+            UNFETCHABLE_DEPS+=("$main_package")
+        else
+            show_message "✅ Main package installed successfully!"
+        fi
+    else
+        show_error "Could not find the main package file. Manual intervention required."
+    fi
+
     # Check for broken packages and attempt to fix
     show_info "🔍 Checking for broken packages..."
     if dpkg-query -W -f='${Status}\n' | grep -q "installed.*unpacked"; then
@@ -376,50 +364,112 @@ install_packages() {
     show_message "🎉 Intelligent package installation completed!"
 }
 
-# Confirmation function before long operations
-confirm() {
-    read -p "$(cecho "$YELLOW" "⚠️ Are you sure you want to proceed? [y/N]: ")" choice
-    case "$choice" in 
-        y|Y ) return 0 ;;
-        * ) return 1 ;;
-    esac
+# Function to clean up in case of failure
+cleanup_on_failure() {
+    show_warning "🧹 Cleaning up partial installations..."
+    retry_command apt-get install -f -y
+    dpkg --configure -a
+    retry_command apt-get autoremove -y
 }
 
-# Main menu function
-main_menu() {
+# Function to report unfetchable dependencies
+report_unfetchable_dependencies() {
+    if [ ${#UNFETCHABLE_DEPS[@]} -eq 0 ]; then
+        show_message "🎊 Hurray! I found every single dependency and there was not a single one that I couldn't fetch or download. Which means no problems for you!"
+    else
+        show_warning "⚠️ The following dependencies could not be fetched or installed:"
+        for dep in "${UNFETCHABLE_DEPS[@]}"; do
+            echo "  - $dep"
+        done
+        show_info "Please check these dependencies manually and install them if necessary."
+    fi
+}
+
+# Function to make a ported package (on old Ubuntu)
+make_ported_package() {
+    show_message "🧙‍♂️ Welcome to the Ported Package Creator!"
+    read -p "$(cecho "$WHITE" "📜 Please provide the path to the .deb package you want to port: ")" package_path
+
+    if [[ ! -f "$package_path" ]]; then
+        show_error "The specified file does not exist: $package_path"
+        return 1
+    fi
+
+    copy_and_resolve_dependencies "$package_path"
+    check_package_integrity
+
+    show_message "🎉 Ported package has been created successfully!"
+    show_message "📁 The ported package and its dependencies are located in: $PACKAGE_DIR"
+    show_message "📋 Instructions for the new Ubuntu system:"
+    show_message "1. Copy the entire '$PACKAGE_DIR' folder to the new Ubuntu system."
+    show_message "2. Place it in the exact same location: $PACKAGE_DIR"
+    show_message "3. Run this script on the new system and choose 'Install Ported Package' from the menu."
+}
+
+# Function to install ported package (on new Ubuntu)
+install_ported_package() {
+    show_message "🧙‍♂️ Welcome to the Ported Package Installer!"
+    show_message "🔍 Looking for the ported package folder..."
+
+    if [ -d "$PACKAGE_DIR" ]; then
+        show_message "✅ Ported package folder found: $PACKAGE_DIR"
+        install_packages
+        report_unfetchable_dependencies
+
+        if [ -s "$CONFLICT_RESOLUTION_LOG" ]; then
+            show_info "📋 Package conflict resolutions:"
+            cat "$CONFLICT_RESOLUTION_LOG"
+        fi
+
+        show_message "🌟 Thank you for using the Self-Healing Magical Ubuntu Package Porter. May your packages always be compatible!"
+    else
+        show_error "❌ Ported package folder not found at: $PACKAGE_DIR"
+        show_message "Please make sure you've copied the folder from the old Ubuntu system to this location."
+    fi
+}
+
+# Function to display the main menu
+show_menu() {
+    clear
+    cecho "$MAGENTA" "🧙‍♂️ Self-Healing Magical Ubuntu Package Porter v$VERSION"
+    echo "----------------------------------------"
+    echo "1. Make Ported Package (on old Ubuntu)"
+    echo "2. Install Ported Package (on new Ubuntu)"
+    echo "3. Exit"
+    echo "----------------------------------------"
+}
+
+# Function to check system requirements
+check_system_requirements() {
+    if ! command -v apt-get &> /dev/null; then
+        show_error "This script requires an Ubuntu-based system with apt package manager."
+        exit 1
+    fi
+}
+
+# Main script execution
+main() {
+    trap cleanup_on_failure ERR
+
+    check_system_requirements
+    ensure_sudo
+    create_directories
+    check_and_fix_package_manager
+
     while true; do
-        cecho "$CYAN" "\n--- Self-Healing Magical Ubuntu Package Porter v$VERSION ---"
-        echo "1) Make Ported Package"
-        echo "2) Install Ported Package"
-        echo "3) Exit"
-        read -rp "$(cecho "$MAGENTA" "Please choose an option: ")" choice
+        show_menu
+        read -p "Enter your choice [1-3]: " choice
 
         case $choice in
-            1)
-                if confirm; then
-                    make_ported_package
-                else
-                    show_message "Aborted Make Ported Package."
-                fi
-                ;;
-            2)
-                if confirm; then
-                    install_packages
-                else
-                    show_message "Aborted Install Ported Package."
-                fi
-                ;;
-            3) 
-                show_message "Thank you for using the Self-Healing Magical Ubuntu Package Porter. Goodbye!"; exit 0 ;;
-            *) 
-                show_error "Invalid option. Please try again." ;;
+            1) make_ported_package ;;
+            2) install_ported_package ;;
+            3) show_message "Thank you for using the Self-Healing Magical Ubuntu Package Porter. Goodbye!"; exit 0 ;;
+            *) show_error "Invalid option. Please try again." ;;
         esac
+
+        read -p "Press Enter to continue..."
     done
 }
 
-# Ensure the script is running with sudo
-ensure_sudo
-
-# Create necessary directories and start the main menu
-create_directories
-main_menu
+# Run the main function
+main "$@"

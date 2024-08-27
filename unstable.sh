@@ -245,10 +245,14 @@ install_packages() {
     local installation_order=()
     local failed_packages=()
     local retry_queue=()
-    local main_package=""
 
-    # Identify the main package (the one originally copied, not a dependency)
-    main_package=$(basename "$(ls "$PACKAGE_DIR"/*.deb | grep -v "$(cat "$PACKAGE_DIR/processed_dependencies.txt")")")
+    # Read the main package name
+    if [[ -f "$PACKAGE_DIR/main_package.txt" ]]; then
+        main_package=$(cat "$PACKAGE_DIR/main_package.txt")
+    else
+        show_error "Could not identify the main package. Exiting."
+        exit 1
+    fi
 
     # First pass: Gather dependency information and create installation order
     for deb in "$PACKAGE_DIR"/*.deb; do
@@ -335,7 +339,7 @@ install_packages() {
 
     # Install the main package
     show_message "📦 Installing the main package: $main_package"
-    local main_deb=$(find "$PACKAGE_DIR" -name "${main_package}" -print -quit)
+    local main_deb=$(find "$PACKAGE_DIR" -name "${main_package}_*.deb" -print -quit)
     if [[ -n "$main_deb" ]]; then
         if ! install_single_package "$main_deb"; then
             show_error "Failed to install the main package. Manual intervention may be required."

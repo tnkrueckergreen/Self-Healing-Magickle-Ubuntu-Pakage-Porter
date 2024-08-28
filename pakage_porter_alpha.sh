@@ -138,10 +138,7 @@ copy_and_resolve_dependencies() {
     show_message "🔮 Analyzing package and resolving dependencies..."
     cp "$deb_file" "$PACKAGE_DIR" 2>> "$LOG_FILE"
 
-    # Store the main package name
     local package_name=$(dpkg-deb -f "$deb_file" Package)
-    echo "$package_name" > "$PACKAGE_DIR/main_package.txt"
-    
     install_apt_rdepends
 
     local processed_deps="$PACKAGE_DIR/processed_dependencies.txt"
@@ -245,14 +242,10 @@ install_packages() {
     local installation_order=()
     local failed_packages=()
     local retry_queue=()
+    local main_package=""
 
-    # Read the main package name
-    if [[ -f "$PACKAGE_DIR/main_package.txt" ]]; then
-        main_package=$(cat "$PACKAGE_DIR/main_package.txt")
-    else
-        show_error "Could not identify the main package. Exiting."
-        exit 1
-    fi
+    # Identify the main package (the one originally copied, not a dependency)
+    main_package=$(basename "$(ls "$PACKAGE_DIR"/*.deb | grep -v "$(cat "$PACKAGE_DIR/processed_dependencies.txt")")")
 
     # First pass: Gather dependency information and create installation order
     for deb in "$PACKAGE_DIR"/*.deb; do
@@ -339,7 +332,7 @@ install_packages() {
 
     # Install the main package
     show_message "📦 Installing the main package: $main_package"
-    local main_deb=$(find "$PACKAGE_DIR" -name "${main_package}_*.deb" -print -quit)
+    local main_deb=$(find "$PACKAGE_DIR" -name "${main_package}" -print -quit)
     if [[ -n "$main_deb" ]]; then
         if ! install_single_package "$main_deb"; then
             show_error "Failed to install the main package. Manual intervention may be required."
@@ -382,7 +375,7 @@ cleanup_on_failure() {
 # Function to report unfetchable dependencies
 report_unfetchable_dependencies() {
     if [ ${#UNFETCHABLE_DEPS[@]} -eq 0 ]; then
-        show_message "🎉 Hooray! Every single dependency was successfully resolved and fetched!"
+        show_message "🎊 Hurray! I found every single dependency and there was not a single one that I couldn't fetch or download. Which means no problems for you!"
     else
         show_warning "⚠️ The following dependencies could not be fetched or installed:"
         for dep in "${UNFETCHABLE_DEPS[@]}"; do

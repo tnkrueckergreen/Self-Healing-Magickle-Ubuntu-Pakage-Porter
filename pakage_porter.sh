@@ -382,7 +382,9 @@ cleanup_on_failure() {
 # Function to report unfetchable dependencies
 report_unfetchable_dependencies() {
     if [ ${#UNFETCHABLE_DEPS[@]} -eq 0 ]; then
-        show_message "🎊 Hurray! I found every single dependency and there was not a single one that I couldn't fetch or download. Which means no problems for you!"
+        show_message "🎉 Woohoo! Package porting complete with flying colors! 🌈"
+        show_message "Every single dependency was successfully fetched and installed."
+        show_message "Your ported package is ready to rock on the new system! 🚀"
     else
         show_warning "⚠️ The following dependencies could not be fetched or installed:"
         for dep in "${UNFETCHABLE_DEPS[@]}"; do
